@@ -1,4 +1,4 @@
-var app = angular.module('webCoRE', ['ng', 'ngRoute', 'ngSanitize', 'ngResource', 'ngDialog', 'ngAnimate', 'angular-svg-round-progressbar', 'angular-bootstrap-select', 'swipe', 'dndLists', 'ui.toggle', 'chart.js', 'smartArea', 'ui.bootstrap.contextMenu', 'ngFitText', 'googlechart', 'ngMap']);
+var app = angular.module('webCoRE', ['ng', 'ngRoute', 'ngSanitize', 'ngResource', 'ngDialog', 'ngAnimate', 'angular-svg-round-progressbar', 'angular-bootstrap-select', 'swipe', 'dndLists', 'ui.toggle', 'chart.js', 'smartArea', 'ui.bootstrap.contextMenu', 'ngFitText', 'googlechart', 'ngMap', 'monospaced.elastic']);
 //var cdn = 'https://core.homecloudhub.com/dashboard/';
 var cdn = '';
 var theme = '';
@@ -208,6 +208,33 @@ app.directive('tileHeight', function(){
 });
 
 
+app.directive('tileMeta', ['$parse', '$sce', function($parse, $sce) {
+  var directive = {
+      restrict: 'A',
+      scope: false,
+      link: function (scope, elem, attrs) {
+          function updateTileMeta() {
+              var pistonMeta = $parse(attrs.tileMeta)(scope);
+              var index = $parse(attrs.tileIndex)(scope) + 1;
+              var meta = renderString($sce, pistonMeta['t' + index]).meta;
+              if (!meta || !meta.type) {
+                meta = renderString($sce, pistonMeta['f' + index]).meta;
+              }
+              if (!meta || !meta.type) {
+                meta = renderString($sce, pistonMeta['i' + index]).meta;
+              }
+              scope.$parent.meta = meta;
+          }
+          
+          scope.$watchCollection(attrs.tileMeta, updateTileMeta);
+          scope.$watch(attrs.tileIndex, updateTileMeta);
+      }
+  };
+
+  return directive;
+}]);
+
+
 app.directive('help', ['$compile', function($compile) {
 	var directive = {
 		restrict: 'A',
@@ -305,7 +332,6 @@ app.directive('collapseControl', ['dataService', function(dataService) {
 		var id = (attr.target || attr.ariaControls || '').replace('#', '');
 		var wasCollapsed = dataService.isCollapsed(id);
 		
-    console.log(attr);
 		if (wasCollapsed && 'ariaExpanded' in attr) {
 			element.attr('aria-expanded', 'false');
 		}
@@ -331,6 +357,46 @@ app.directive('collapseTarget', ['dataService', function(dataService) {
 	};
 }]);
 
+app.directive('taskedit', function() {
+	return {
+		restrict: 'A',
+		scope: false,
+		link: function(scope, elem, attr) {
+			var watchers = [];
+			function setupCommand(command) {
+				if (watchers.length > 0) {
+					for (var i = 0; i < watchers.length; i++) {
+						watchers[i]();
+					}
+					watchers = [];
+				}
+				// Custom visibility toggling for httpRequest parameters 
+				if (command === 'httpRequest') {
+					function toggleHttpRequestFields() {
+						var parameters = scope.designer.parameters;
+						var method = parameters[1].data.c; 
+						var useQueryString = method === 'GET' || method === 'DELETE' || method === 'HEAD';
+						var requestBodyTypeOperand = parameters[2];
+						var sendVariablesOperand = parameters[3];
+						var requestBodyOperand = parameters[4];
+						var contentTypeOperand = parameters[5];
+						var custom = requestBodyTypeOperand.data.c === 'CUSTOM' && !useQueryString;
+						
+						requestBodyTypeOperand.hidden = useQueryString;
+						sendVariablesOperand.hidden = custom;
+						contentTypeOperand.hidden = requestBodyOperand.hidden = !custom || useQueryString;
+					}
+					watchers.push(
+						scope.$watch('designer.parameters[1].data.c', toggleHttpRequestFields),
+						scope.$watch('designer.parameters[2].data.c', toggleHttpRequestFields)
+					);
+				}
+			}
+			scope.$watch('designer.command', setupCommand);
+		}
+	};
+});
+
 app.filter('orderObjectBy', function() {
   return function(items, field, reverse) {
     var filtered = [];
@@ -343,6 +409,26 @@ app.filter('orderObjectBy', function() {
     if(reverse) filtered.reverse();
     return filtered;
   };
+});
+
+app.filter('dashify', function() {
+  return function(value) {
+    return dashify(value, { condense: true });
+  }
+});
+
+app.filter('uniqueDashify', function() {
+  var keyByUniqueValue = {};
+  return function(value, key) {
+    value = dashify(value, { condense: true });
+    var unique = value;
+    var i = 1;
+    while (unique in keyByUniqueValue && keyByUniqueValue[unique] !== key) {
+      unique = value + '-' + i++;
+    }
+    keyByUniqueValue[unique] = key;
+    return unique;
+  }
 });
 
 
@@ -657,6 +743,9 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 	}
 
 	dataService.logout = function() {
+		locations = {};
+		instances = {};
+		storage = {};
 		return localforage.clear();
 	}
 
@@ -831,17 +920,10 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 				}
 				data.endpoint = si.uri;
 				data.accessToken = si.accessToken;
-				dataService.deleteFromStore('dashboardErrorCount');
 				return data;	
 			}, function(error) {
-				var errorCount = dataService.loadFromStore('dashboardErrorCount') || 1;
-				if (errorCount >= 3) {
-					dataService.logout();
-					status('There was a problem loading the dashboard data, please reload the dashboard to reauthorize this browser');
-				} else {
-					status('There was a problem loading the dashboard data');
-				}
-				dataService.saveToStore('dashboardErrorCount', errorCount + 1);
+				status('There was a problem loading the dashboard data. The data shown below may be outdated; please log out if this problem persists.');
+				return error;
 			});
     };
 
@@ -1724,13 +1806,18 @@ function renderString($sce, value) {
                         while (/(\bsrc=\S+),/.test(cls)) {
                           cls = cls.replace(/(\bsrc=\S+),/, '$1:webCoRE-comma:');
                         }
-                        cls = cls.replace(/\s+/g, ',').split(',');
+                        cls = cls.replace(/'.*? .*?'|".*? .*?"/g, function(match) {
+                            return match.replace(/\s+/g, ':webCoRE-space:');
+                        })
+                        cls = cls.split(/,|\s+/);
                         var className = '';
                         var color = '';
+						var attributes = '';
 						var backColor='';
 						var fontSize = '';
                         for (x in cls) {
 							if (!cls[x]) continue;
+                            cls[x] = cls[x].replace(/:webCoRE-comma:/g, ',').replace(/:webCoRE-space:/g, ' ');
                             switch (cls[x]) {
                                 case 'b': 
                                 case 'u':
@@ -1761,25 +1848,28 @@ function renderString($sce, value) {
                                 default:
 									if (/^\d+(\.\d+)?(x|em)/.test(cls[x])) {
 										fontSize = cls[x].replace('x', 'em');
-									} else if (cls[x].startsWith('b-')) {
-										backColor = cls[x].substr(2).replace(/[^#0-9a-z]/gi, '');
-									} else if (cls[x].startsWith('bk-') || cls[x].startsWith('bg-')) {
-										backColor = cls[x].substr(3).replace(/[^#0-9a-z]/gi, '');
-									} else if (cls[x].startsWith('back-')) {
-										backColor = cls[x].substr(5).replace(/[^#0-9a-z]/gi, '');
+									} else if (cls[x].startsWith('fa-')) {
+										className += cls[x] + ' ';
+									} else if (cls[x].startsWith('data-fa-')) {
+										attributes += ' ' + cls[x];
+									} else if (cls[x].startsWith('color-')) {
+										color = cls[x].substr(6);
+									} else if (/^(b|bg|bk|back)-/.test(cls[x])) {
+										backColor = cls[x].replace(/^(b|bg|bk|back)-/, '');
 									} else if (cls[x].indexOf('=') > 0) {
 										//options
 										var p = cls[x].indexOf('=');
-										meta.options[cls[x].substr(0, p)] = cls[x].substr(p + 1).replace(/:webCoRE-comma:/g, ',');
+										meta.options[cls[x].substr(0, p)] = cls[x].substr(p + 1);
 									} else {
 										color = cls[x].replace(/[^#0-9a-z]/gi, '');
 									}
                             }
                         }
+						meta.attributes = attributes;
 						meta.className = className;
 						meta.color = color;
 						meta.backColor = backColor;
-                        return '<span ' + (className ? 'class="' + className + '" ' : '') + (!!color || !!backColor || !!fontSize ? 'style="' + (color ? 'color: ' + color + ' !important;' : '') + ' ' + (backColor ? 'background-color: ' + backColor + ' !important;' : '') + ' ' + (fontSize ? 'font-size: ' + fontSize + ' !important;' : '') + '"' : '') + '>' + result + '</span>';
+                        return '<span ' + (className ? 'class="' + className + '" ' : '') + (!!color || !!backColor || !!fontSize ? 'style="' + (color ? 'color: ' + color + ' !important;' : '') + ' ' + (backColor ? 'background-color: ' + backColor + ' !important;' : '') + ' ' + (fontSize ? 'font-size: ' + fontSize + ' !important;' : '') + '"' : '') + attributes + '>' + result + '</span>';
                     default:
                         result += c;
                 }
@@ -1788,19 +1878,20 @@ function renderString($sce, value) {
             return result;
         }
 
-		meta.html = process(value).replace(/\:fa-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fa ' + match.replace(/\:/g, '').toLowerCase() + '"></i>';
-        }).replace(/\:fa5-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fa5 ' + match.replace(/\:/g, '').replace(/fa5\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fal-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fal ' + match.replace(/\:/g, '').replace(/fal\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:far-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="far ' + match.replace(/\:/g, '').replace(/far\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fas-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fas ' + match.replace(/\:/g, '').replace(/fas\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fab-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fab ' + match.replace(/\:/g, '').replace(/fab\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match) {
+		meta.html = process(value).replace(/\:(fa[blrs5]?)([ -])([a-z0-9\-\s.="']*)\:/gi, function(match, prefix, union, classes) {
+            var attributes = '';
+            // Default deprecated fa5 prefix to solid weight
+            prefix = prefix.toLowerCase();
+            prefix = prefix === 'fa5' ? 'fas' : prefix;
+            // Support shorthand fas-stroopwafel for fas fa-stroopwafel
+            classes = classes.toLowerCase();
+            classes = union === '-' ? 'fa-' + classes : classes;
+            classes = classes.replace(/(data-fa.*?=(?:'.*?'|".*?"))\s*/gi, function(match) {
+                attributes += ' ' + match;
+                return '';
+            });
+            return '<i class="' + prefix.toLowerCase() + ' ' + classes.toLowerCase() + '"' + attributes + '></i>';
+      }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match) {
 			var iconSet = match[4];
 			if (iconSet == 'v') {
 				iconSet += match[5];
@@ -1956,6 +2047,50 @@ if (document.selection) {
      document.execCommand("Copy");
 }}
 
+window.FontAwesomeConfig = {
+  autoReplaceSvg: 'nest',
+};
+
+var fontAwesomePro = true;
+
+function loadFontAwesomeFallback() {
+  fontAwesomePro = false;
+  $('head script[src*="pro.fontawesome"]').each(function() {
+    $(this).remove().clone()
+      .attr({
+        src: this.src.replace('pro', 'use'),
+      }).removeAttr('onerror')
+      .appendTo('head');
+  });
+}
+
+
+// Map .far to .fas free icons when Pro is not available
+app.directive('far', function() {
+	var directive = {
+		restrict: 'C',
+		link: function(scope, element) {
+			if (!fontAwesomePro) {
+				element.toggleClass('far fas');
+			}
+		}
+	};
+	return directive;
+});
+
+// Map .fal to .fas free icons when Pro is not available
+app.directive('fal', function() {
+	var directive = {
+		restrict: 'C',
+		link: function(scope, element) {
+			if (!fontAwesomePro) {
+				element.toggleClass('fal fas');
+			}
+		}
+	};
+	return directive;
+});
+
 // Polyfills
 if (!String.prototype.endsWith) {
 	String.prototype.endsWith = function(search, this_len) {
@@ -1966,4 +2101,4 @@ if (!String.prototype.endsWith) {
 	};
 }
 
-version = function() { return 'v0.3.000.20180224'; };
+version = function() { return 'v0.3.107.20180806'; };
